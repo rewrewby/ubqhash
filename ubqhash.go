@@ -115,6 +115,13 @@ func (cache *cache) compute(dagSize uint64, hash common.Hash, nonce uint64) (ok 
 	// This is important because a GC might happen and execute
 	// the finalizer before the call completes.
 	_ = cache
+	
+	// log prints
+	fmt.Printf("hash:    \t%v | %x\n", hash, hash)
+	fmt.Printf("nonce:   \t%v | %x\n", nonce, nonce)
+	fmt.Printf("mixhash: \t%v | %x\n", ret.mix_hash, ret.mix_hash)
+	fmt.Printf("result:  \t%v | %x\n", ret.result, ret.result
+	
 	return bool(ret.success), h256ToHash(ret.mix_hash), h256ToHash(ret.result)
 }
 
@@ -447,4 +454,55 @@ func makeSeedHash(epoch uint64) (sh common.Hash) {
 		sh = crypto.Sha3Hash(sh[:])
 	}
 	return sh
+}
+
+func (l *Light) VerifyShare(block Block, shareDiff *big.Int) (bool, bool, int64, common.Hash) {
+	// For return arguments
+	zeroHash := common.Hash{}
+
+	// TODO: do ethash_quick_verify before getCache in order
+	// to prevent DOS attacks.
+	blockNum := block.NumberU64()
+	if blockNum >= epochLength*2048 {
+		fmt.Println(fmt.Sprintf("ubqhash: block number %d too high, limit is %d", epochLength*2048))
+		return false, false, 0, zeroHash
+	}
+
+	blockDiff := block.Difficulty()
+	/* Cannot happen if block header diff is validated prior to PoW, but can
+		 happen if PoW is checked first due to parallel PoW checking.
+		 We could check the minimum valid difficulty but for SoC we avoid (duplicating)
+	   Ethereum protocol consensus rules here which are not in scope of Ethash
+	*/
+	if blockDiff.Cmp(common.Big0) == 0 {
+		fmt.Println("ubqhash: invalid block difficulty")
+		return false, false, 0, zeroHash
+	}
+
+	if shareDiff.Cmp(common.Big0) == 0 {
+		fmt.Println("ubqhash: invalid share difficulty")
+		return false, false, 0, zeroHash
+	}
+
+	cache := l.getCache(blockNum)
+	dagSize := C.ubqhash_get_datasize(C.uint64_t(blockNum))
+	if l.test {
+		dagSize = dagSizeForTesting
+	}
+	// Recompute the hash using the cache.
+	ok, mixDigest, result := cache.compute(uint64(dagSize), block.HashNoNonce(), block.Nonce())
+	if !ok {
+		return false, false, 0, zeroHash
+	}
+
+	// avoid mixdigest malleability as it's not included in a block's "hashNononce"
+	if blkMix := block.MixDigest(); blkMix != zeroHash && blkMix != mixDigest {
+		return false, false, 0, zeroHash
+	}
+
+	// The actual check.
+	blockTarget := new(big.Int).Div(maxUint256, blockDiff)
+	shareTarget := new(big.Int).Div(maxUint256, shareDiff)
+	actualDiff := new(big.Int).Div(maxUint256, result.Big())
+	return result.Big().Cmp(shareTarget) <= 0, result.Big().Cmp(blockTarget) <= 0, actualDiff.Int64(), mixDigest
 }
