@@ -39,6 +39,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+	"bytes"
+	"encoding/binary"
 
 	"github.com/ubiq/go-ubiq/common"
 	"github.com/ubiq/go-ubiq/crypto"
@@ -117,10 +119,10 @@ func (cache *cache) compute(dagSize uint64, hash common.Hash, nonce uint64) (ok 
 	_ = cache
 	
 	// log prints
-	fmt.Printf("hash:    \t%v | %x\n", hash, hash)
-	fmt.Printf("nonce:   \t%v | %x\n", nonce, nonce)
-	fmt.Printf("mixhash: \t%v | %x\n", ret.mix_hash, ret.mix_hash)
-	fmt.Printf("result:  \t%v | %x\n", ret.result, ret.result)
+	//fmt.Printf("hash:    \t%v | %x\n", hash, hash)
+	//fmt.Printf("nonce:   \t%v | %x\n", nonce, nonce)
+	//fmt.Printf("mixhash: \t%v | %x\n", ret.mix_hash, ret.mix_hash)
+	//fmt.Printf("result:  \t%v | %x\n", ret.result, ret.result)
 	
 	return bool(ret.success), h256ToHash(ret.mix_hash), h256ToHash(ret.result)
 }
@@ -455,6 +457,57 @@ func makeSeedHash(epoch uint64) (sh common.Hash) {
 	}
 	return sh
 }
+
+/*
+    support code for open-ethereum-pool, NiceHash extensions
+ */
+func (l *Light) computeMixDigest(blockNum uint64, hashNoNonce common.Hash, nonce uint64) (ok bool, mixDigest common.Hash, result common.Hash) {
+	cache := l.getCache(blockNum)
+	dagSize := C.ubqhash_get_datasize(C.uint64_t(blockNum))
+	return cache.compute(uint64(dagSize), hashNoNonce, nonce)
+}
+func le256todouble(target [32]byte) float64 {
+	var bits192 float64 = 6277101735386680763835789423207666416102355444464034512896.0
+	var bits128 float64 = 340282366920938463463374607431768211456.0
+	var bits64 float64 = 18446744073709551616.0
+	var dcut64 float64
+	var data64 uint64
+	buf := bytes.NewReader(target[24:32])
+	binary.Read(buf, binary.LittleEndian, &data64)
+	dcut64 = float64(data64) * bits192
+	buf = bytes.NewReader(target[16:24])
+	binary.Read(buf, binary.LittleEndian, &data64)
+	dcut64 += float64(data64) * bits128
+	
+	buf = bytes.NewReader(target[8:16])
+	binary.Read(buf, binary.LittleEndian, &data64)
+	dcut64 += float64(data64) * bits64
+	
+	buf = bytes.NewReader(target[0:16])
+	binary.Read(buf, binary.LittleEndian, &data64)
+	dcut64 += float64(data64)
+	return dcut64
+}
+func share_diff(h [32]byte) float64 {
+	var truediffone float64 = 26959535291011309493156476344723991336010898738574164086137773096960.0
+	var s64 float64
+	var hash_end [32]byte
+	for i := 0; i < 32; i++ {
+		hash_end[31-i] = h[i]
+	}
+	s64 = le256todouble(hash_end)
+	if s64 <= 0 {
+		return 0.0
+	}
+	return truediffone / s64
+}
+func (l *Light) GetShareDiff(blockNum uint64, headerHash common.Hash, nonce uint64) (diff float64, mixDigest common.Hash) {
+	_, md, h := l.computeMixDigest(blockNum, headerHash, nonce)
+	var b [32]byte
+	copy(b[:], h.Bytes())
+	return share_diff(b), md
+}
+/* open-ethereum-pool additions END */
 
 func (l *Light) VerifyShare(block Block, shareDiff *big.Int) (bool, bool, int64, common.Hash) {
 	// For return arguments
